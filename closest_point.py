@@ -6,7 +6,7 @@ from time import perf_counter
 ti.init(arch=ti.cpu)
 
 RES = 1024, 1024
-NB_REF_POINTS = 100
+NB_REF_POINTS = 1024
 NB_DST_POINTS = NB_REF_POINTS
 
 error = 0
@@ -40,7 +40,7 @@ def computeVisualSdf():
     """
     dmax = math.sqrt(RES[0]*RES[0] + RES[1]*RES[1])
     for i,j in visual_sdf:
-        dmin = ti.cast(RES[0] * RES[1] * 2, ti.f32)
+        dmin = ti.cast(RES[0] * RES[1], ti.f32)
         for n in range(NB_REF_POINTS):
             a = ref_pts[n,0]
             b = ref_pts[n,1]
@@ -49,8 +49,28 @@ def computeVisualSdf():
                 dmin = d
         dmin = ti.sqrt(dmin)
         visual_sdf[i,j][0] = dmin / dmax
-        visual_sdf[i,j][1] = dmin / dmax
-        visual_sdf[i,j][2] = dmin / dmax
+        visual_sdf[i,j][1] = 0 #dmin / dmax
+        visual_sdf[i,j][2] = 0 #dmin / dmax
+
+@ti.kernel
+def writeDstPtsOnVisualSdfGreen():
+    """
+    Write the dst point on the blue chanel of the SDF.
+    """
+    for n in range(NB_DST_POINTS):
+        i = ti.cast(dst_pts[n,0], ti.i32)
+        j = ti.cast(dst_pts[n,1], ti.i32)
+        visual_sdf[i,j][1] = 1
+
+@ti.kernel
+def writeDstPtsOnVisualSdfBlue():
+    """
+    Write the dst point on the blue chanel of the SDF.
+    """
+    for n in range(NB_DST_POINTS):
+        i = ti.cast(dst_pts[n,0], ti.i32)
+        j = ti.cast(dst_pts[n,1], ti.i32)
+        visual_sdf[i,j][2] = 1
 
 @ti.kernel
 def computeSdf():
@@ -60,7 +80,7 @@ def computeSdf():
     ref_mean_x = ti.cast(0, ti.f32)
     ref_mean_y = ti.cast(0, ti.f32)
     for i,j in sdf:
-        dmin = ti.cast(RES[0] * RES[1] * 2, ti.f32)
+        dmin = ti.cast(RES[0] * RES[1], ti.f32)
         closest_index = 0
         for n in range(NB_REF_POINTS):
             x = ref_pts[n,0]
@@ -229,7 +249,7 @@ center_y = RES[0] / 2
 ref_pts_numpy = createInputPointCloud(side_size, center_x, center_y, NB_REF_POINTS)
 ref_pts.from_numpy(ref_pts_numpy)
 
-alpha = math.radians(25)
+alpha = math.radians(5)
 rot = np.array([[math.cos(alpha),-math.sin(alpha)],[math.sin(alpha),math.cos(alpha)]])
 trans = np.array([45, 21])
 dst_pts_numpy = applyTransform(trans, rot, ref_pts_numpy)
@@ -252,8 +272,11 @@ print("computeSdf: %f [ms]" % ((stop_time - start_time)*1000))
 
 compueRefDstError()
 
+# Show the intial state of the dst points
+writeDstPtsOnVisualSdfGreen()
+
 nb_passes = 0
-while nb_passes < 100 and error < 1:
+while nb_passes < 10 and error < 1:
     # compute ICP
     start_time = perf_counter() 
     computeIcp()
@@ -263,10 +286,14 @@ while nb_passes < 100 and error < 1:
     compueRefDstError()
     nb_passes += 1
 
+# Show the final state of the dst points
+writeDstPtsOnVisualSdfBlue()
+
 #--------------------------------------------------------
 # visualization
-gui = ti.GUI('Closest point', RES)
-while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
-    pos = gui.get_cursor_pos()
-    gui.set_image(visual_sdf)
-    gui.show()
+ti.imshow(visual_sdf, 'SDF ref')
+# gui = ti.GUI('Closest point', RES)
+# while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
+#     pos = gui.get_cursor_pos()
+#     gui.set_image(visual_sdf)
+#     gui.show()

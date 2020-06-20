@@ -8,17 +8,26 @@ ti.init(arch=ti.cpu)
 RES = 1024, 1024
 NB_REF_POINTS = 1024
 
+# dim1 = distance
+# dim2,3 = direction vector
+sdf = ti.Vector(3, dt=ti.f32)
+ti.root.dense(ti.ij, RES).place(sdf)
+
 pts = ti.var(ti.f32)
 block1 = ti.root.bitmasked(ti.ij, RES)
 block1.place(pts)
 
-# dim1 = normal
-visual_norm = ti.Vector(3, dt=ti.f32)
-ti.root.bitmasked(ti.ij, RES).place(visual_norm)
+# dim1 = normal (TODO)
+#visual_norm = ti.Vector(3, dt=ti.f32)
+#ti.root.bitmasked(ti.ij, RES).place(visual_norm)
 
-# dim1 = distance
+# dim1 = curv
 visual_curv = ti.Vector(3, dt=ti.f32)
 ti.root.bitmasked(ti.ij, RES).place(visual_curv)
+
+# dim1,2,3 = normalized laplacian for grayscale visuaization
+visual_laplacian = ti.Vector(3, dt=ti.f32)
+ti.root.dense(ti.ij, RES).place(visual_laplacian)
 
 @ti.kernel
 def placePts(np_pts: ti.ext_arr()):
@@ -26,6 +35,31 @@ def placePts(np_pts: ti.ext_arr()):
         x = ti.cast(np_pts[n,0], ti.i32)
         y = ti.cast(np_pts[n,1], ti.i32)
         pts[x,y] = 1
+
+@ti.kernel
+def computeSdf(np_pts: ti.ext_arr()):
+    """
+    Create the signed distance field
+    """
+    for i,j in sdf:
+        dmin = ti.cast(RES[0] * RES[1], ti.f32)
+        closest_x = 0
+        closest_y = 0
+        for n in range(NB_REF_POINTS):
+            x = ti.cast(np_pts[n,0], ti.i32)
+            y = ti.cast(np_pts[n,1], ti.i32)
+            d = (i-x)*(i-x) + (j-y)*(j-y)
+            if d < dmin:
+                dmin = d
+                closest_x = x
+                closest_y = y
+        sdf[i,j][0] = ti.sqrt(dmin)
+        if sdf[i,j][0] != 0:
+            sdf[i,j][1] = (closest_x - i) / sdf[i,j][0]
+            sdf[i,j][2] = (closest_y - j) / sdf[i,j][0]
+        else:
+            sdf[i,j][1] = 0
+            sdf[i,j][2] = 0
 
 @ti.kernel
 def computeNormalAndCurvature():
@@ -185,17 +219,60 @@ def computeNormalAndCurvature():
         #scaledMat.diagonal ().array () -= eigenvalues (0)
         #eigenvector = detail::getLargest3x3Eigenvector<Vector> (scaledMat).vector;
 
-        # Compute normal vector
-        visual_norm[i,j][0] = eigen_val_0 #eigen_vector[0]
-        visual_norm[i,j][1] = eigen_val_1 #eigen_vector[1]
-        visual_norm[i,j][2] = eigen_val_2 #eigen_vector[2]
+        # Compute normal vector (TODO)
+        #visual_norm[i,j][0] = eigen_val_0 #eigen_vector[0]
+        #visual_norm[i,j][1] = eigen_val_1 #eigen_vector[1]
+        #visual_norm[i,j][2] = eigen_val_2 #eigen_vector[2]
 
         # Compute the curvature surface change
         eig_sum = cov_mat_0 + cov_mat_1 + cov_mat_2
         visual_curv[i,j][0] = 0
         if eig_sum != 0:
             visual_curv[i,j][0] = eigen_val_1 # true curvature is: ti.abs(eigen_value / eig_sum)
-    
+
+@ti.kernel
+def computeVisualLaplacian():
+    """
+    Create the laplacian at any point using the method described here:
+    - paper: https://www.cs.cmu.edu/~kmcrane/Projects/MonteCarloGeometryProcessing/paper.pdf
+    - project page: https://www.cs.cmu.edu/~kmcrane/Projects/MonteCarloGeometryProcessing/index.html
+    Uses the SDF (SDF and Laplacian tensor must have the same shape).
+    """
+    epsilon = ti.cast(1, ti.f32)
+    max_iter = 32
+    n_walks = ti.cast(128, ti.i32)
+    for i,j in sdf:
+        sum_u_x = ti.cast(0, ti.f32)
+        sum_u_y = ti.cast(0, ti.f32)
+        sum_u_curv = ti.cast(0, ti.f32)
+        for walk in range(n_walks):
+            d = sdf[i,j][0]
+            n = 0
+            x_index = i
+            y_index = j
+            while d > epsilon and n < max_iter:
+                 alpha = ti.random() * 2 * 3.14159
+                 x = x_index + d * ti.cos(alpha)
+                 y = y_index + d * ti.sin(alpha)
+                 x_index = ti.cast(x, ti.i32)
+                 y_index = ti.cast(y, ti.i32)
+                 d = sdf[x_index, y_index][0]
+                 n += 1
+            #sum_u += getBoundaryValue(x_index, y_index) 
+            dx =  sdf[x_index+1, y_index-1][0] - sdf[x_index-1, y_index-1][0] \
+                + sdf[x_index+1, y_index][0]   - sdf[x_index-1, y_index][0]   \
+                + sdf[x_index+1, y_index+1][0] - sdf[x_index-1, y_index+1][0]
+            dy =  sdf[x_index-1, y_index+1][0] - sdf[x_index-1, y_index-1][0] \
+                + sdf[x_index,   y_index+1][0] - sdf[x_index,   y_index-1][0] \
+                + sdf[x_index+1, y_index+1][0] - sdf[x_index+1, y_index-1][0]
+            sum_u_x += ti.abs(dx)
+            sum_u_y += ti.abs(dy)
+            for xx in range(-1, 2):
+                for yy in range(-1, 2):
+                    sum_u_curv += visual_curv[x_index+xx,y_index+yy][0]
+        visual_laplacian[i,j][0] = sum_u_x / n_walks / ti.sqrt(sdf[i,j][0])
+        visual_laplacian[i,j][1] = sum_u_y / n_walks / ti.sqrt(sdf[i,j][0])
+        visual_laplacian[i,j][2] = sum_u_curv / n_walks
     
 def createInputPointCloud(side_size:int, center_x:int, center_y:int, nb_pts:int):
     """
@@ -251,11 +328,17 @@ ref_pts_numpy = np.append(ref_pts_numpy, ref_pts_numpy2, axis=0)
 #--------------------------------------------------------
 # actual computation
 
-# compute normals
+# place the input points into the bitmasked grid
 start_time = perf_counter() 
 placePts(ref_pts_numpy)
 stop_time = perf_counter()
 print("placePts: %f [ms]" % ((stop_time - start_time)*1000))
+
+# compute SDF
+start_time = perf_counter() 
+computeSdf(ref_pts_numpy)
+stop_time = perf_counter()
+print("computeSdf: %f [ms]" % ((stop_time - start_time)*1000))
 
 # compute normals
 start_time = perf_counter() 
@@ -265,12 +348,13 @@ print("computeNormalAndCurvature: %f [ms]" % ((stop_time - start_time)*1000))
 
 # compute normals
 start_time = perf_counter() 
-computeNormalAndCurvature()
+computeVisualLaplacian()
 stop_time = perf_counter()
-print("computeNormal: %f [ms]" % ((stop_time - start_time)*1000))
-
+print("computeVisualLaplacian: %f [ms]" % ((stop_time - start_time)*1000))
 
 #--------------------------------------------------------
 # visualization
-ti.imshow(visual_norm, 'Normals')
-ti.imshow(visual_curv, 'Curvature')
+#ti.imshow(sdf, 'SDF')
+#ti.imshow(visual_norm, 'Normals')
+#ti.imshow(visual_curv, 'Curvature')
+ti.imshow(visual_laplacian, 'Laplacian')
